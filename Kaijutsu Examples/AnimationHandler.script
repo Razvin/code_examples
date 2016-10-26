@@ -1,0 +1,185 @@
+--this script handles movement and any other extras for combat animations
+
+go.property("base_speed", 400) --the speed that all characters move from point to point
+go.property("num_attacks", 0) --number of attacks the character has
+go.property("character_name",hash(""))
+go.property("file_reader_url", msg.url()) --file reader url path
+go.property("burke_flag",0)
+
+function init(self)
+	self.move_bridge=require "main.move_select_bridge"
+	--initailize animation table
+	self.current_anim =0
+	self.anim_table = {}
+    self.anim_table[0]= "#Idle"
+	for i=1,self.num_attacks do
+		msg.post("#Attack"..i, "disable")
+		self.anim_table[i]= "#Attack"..i
+	end
+	--initialize global variables
+    self.movement_done= false
+    self.current_move=0
+    self.target = vmath.vector3()
+    self.enemy_hitbox = vmath.vector3()
+    self.home_pos = go.get_position()
+    self.speed_mod=0
+    self.delay=0
+    self.animating=false
+    --if the character isn't burke use the standard method of getting animation data from the text file
+    if self.burke_flag ~=1 then
+    	msg.post(self.file_reader_url, "get_anim_movement",{character=self.character_name})
+    end
+
+end
+
+function update(self, dt)
+	-- if the current animation isn't idle and it is not done animating
+	if self.current_anim ~=0 and self.movement_done==false then
+		if self.speed_mod>0 then --if the character is supposed to move for this step
+			local my_2D_pos = vmath.vector3(go.get_position().x,go.get_position().y,0)
+			local distVec = vmath.vector3(self.target-my_2D_pos)
+			if vmath.length(distVec)<50 then
+			--if the character is within the target range load the next move
+				next_move(self)
+			else
+			--moves the character if not within target range
+				local dirVec = vmath.normalize(distVec)
+				local velocity = dirVec * self.speed_mod * self.base_speed
+   				go.set_position(go.get_position() + dt * velocity)
+			end
+		else
+			--calculate how much the character has left for the delay if they aren't supposed to move
+			self.delay= self.delay-dt
+			if self.delay<=0 then
+				--delay finished, load next move
+				next_move(self)
+			end
+		end
+	elseif	self.animating==false and self.movement_done==true and self.current_anim ~=0 then
+		--the animation is finished, reset the data and put the character back to its idle
+		msg.post(self.anim_table[0], "enable")
+    	msg.post(self.anim_table[self.current_anim], "disable")
+    	msg.post(self.anim_table[0], "play_animation", {id = hash("Idle")})
+    	self.current_anim=0
+		--let whoever the initial sender was know the animation finished
+    	msg.post(self.current_sender, "attack_anim_finished")
+    	self.current_sender=msg.url()
+	end
+end
+
+function on_message(self, message_id, message, sender)
+    if message_id == hash("return_anim_movement") then
+		--if the message contains animation movement load data to movement table
+    	self.movement_table= message
+    	print(go.get_id())
+    	pprint(message)
+    end
+    
+    if message_id == hash("start_attack") and message.attack_num<=self.num_attacks then
+    	--if valid attack id, commence animation logic
+    	print("attacking "..go.get_id())
+    	self.current_sender = sender
+    	self.current_anim=message.attack_num
+    	self.enemy_hitbox = message.enemy_hitbox 
+    	msg.post(self.anim_table[self.current_anim], "enable")
+    	msg.post(self.anim_table[0], "disable")
+		--tells the system to play the flip_book animation
+    	msg.post(self.anim_table[self.current_anim], "play_animation", {id = hash("attack")})
+    	self.animating = true
+    	self.movement_done = false
+    	next_move(self)
+    else
+    	msg.post(sender, "anim_failed") --let sender know the animation failed if not a valid id
+    end
+    
+    if message_id == hash("animation_done") and self.current_anim ~=0 then
+		--message from the animation that it has finished
+    	self.animating=false
+    end
+	
+    --message recieved upon Burke entering the combat scene
+    if message_id == hash("fix_burke_table") then
+    	--burke has many different move combinations he can bring to the fight
+		--not all in the same order, finding the right index for each is
+		--is important for the file reader
+		print("fixing burke table "..#message)
+    	local move_select={}
+    	for i=1,#message,1 do
+    		self.anim_table[i]=message[i]
+    		local url_string=message[i]
+			local move_name= string.sub(url_string,2,string.len(url_string))
+			print(move_name)
+			move_num = self.move_bridge.get_index(move_name)
+			move_select[i]=move_num
+    	end
+    	self.num_attacks= #message
+    	local move_count =self.move_bridge.get_count()
+    	for i=1,move_count,1 do
+    		msg.post("#"..self.move_bridge.get_move(i), "disable")
+    	end
+    	
+    	self.anim_table["ouch"] = "#ouch"
+    	msg.post("#ouch", "disable")
+		--need to feed the filereader move selection table to get the right data for his attacks
+    	msg.post(self.file_reader_url, "get_anim_movement",{character=self.character_name,move_selection=move_select})
+    end
+    
+    if message_id == hash("ouch") then
+		--character is being hit and reacts
+    	self.current_anim="ouch"
+    	msg.post(self.anim_table[self.current_anim], "enable")
+    	msg.post(self.anim_table[0], "disable")
+    	msg.post(self.anim_table[self.current_anim], "play_animation", {id = hash("ow")})
+    	self.animating = true
+    	self.movement_done = true
+    end
+end
+
+function next_move(self)
+	self.current_move= self.current_move+1
+	
+	local move_num = self.current_anim
+	--movements are 3 dimesional tables [the animation][current movement][movement information]
+	local next_movement = self.movement_table[move_num][self.current_move]
+	
+	if next_movement == nil then
+		--no new movement data so the character has finished its animation data
+		self.current_move=0
+		self.movement_done=true
+	else
+		--since tables and json can have the same key and have different data types
+		--I used that to have preset information such as "home" for home position
+		--if not a preset it would be a vector3
+		local target = next_movement["target"]
+		if target == "home" then
+			self.target = self.home_pos
+		elseif target == "hitbox" then
+			--often we may want offset to the hit box area
+			--for instance a negative y to get the attack to end closer to the head
+			local hit_offset = next_movement["hit_offset"] 
+			if hit_offset ~= nil then
+				hit_offset = vmath.vector3(hit_offset["x"], hit_offset["y"], 0)
+			else
+				hit_offset = vmath.vector3()
+			end
+			
+			self.target = self.enemy_hitbox + hit_offset
+		else
+			self.target = vmath.vector3(target["x"], target["y"], 0)
+		end
+		
+		self.delay = next_movement["delay"] --there is only a delay if speed_mod is 0
+		self.speed_mod = next_movement["speed"] --can speed up or slow down the base_speed for movement
+		
+		if self.speed_mod== "instant" then
+			--sometimes the movement to a position needs to be instant like a teleport attack
+			go.set_position(self.target)
+			next_move(self)
+		end
+		
+		local sound = next_movement["sound"]
+		if sound ~= nil then
+			msg.post("combat:/sounds#"..sound, "play_sound")
+		end
+	end
+end
