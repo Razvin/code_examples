@@ -1,0 +1,36 @@
+--simple script that loads json files and sends back lua tables to requesters
+
+function init(self)
+    self.hash_bridge=require "main.Hash_Bridge"
+    local move_data = sys.load_resource("/main/data/text/animation_move_data.json")
+    local spawn_data = sys.load_resource("/main/data/text/spawn_data.json")
+	-- Decode json string to a Lua table
+	self.move_data_table = json.decode(move_data)
+	self.spawn_data_table = json.decode(spawn_data)
+end
+
+function on_message(self, message_id, message, sender)
+    if message_id == hash("get_anim_movement") then
+    	character = self.hash_bridge.DeHash(message.character)
+    	if character ~= nil then
+    		if message.move_selection~=nil then
+    			local move_table = {}
+    			for i=1,#message.move_selection,1 do
+    				move_table[i] = self.move_data_table[character][message.move_selection[i]]
+    			end
+    			msg.post(sender,"return_anim_movement",move_table)
+    		else
+    			msg.post(sender,"return_anim_movement",self.move_data_table[character])
+    		end
+    	end
+    end
+    
+    if message_id == hash("get_spawn_data") then
+    	character = self.hash_bridge.DeHash(message.character)
+    	if character ~= nil then
+    		msg.post(sender,"return_spawn_data",self.spawn_data_table[character])
+    	end
+    end
+end
+
+
